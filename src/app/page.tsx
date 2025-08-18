@@ -227,7 +227,6 @@ const findBestMatch = (businessField: { key: string; label: string }, columnName
       });
       score = Math.max(score, keywordScore);
       
-      // Boost score for specific patterns (only if not already high)
       if (score < 0.8) {
         if (fieldKey.includes('price') && columnLower.includes('price')) score += 0.2;
         if (fieldKey.includes('tax') && columnLower.includes('tax')) score += 0.2;
@@ -252,23 +251,44 @@ const autoMapColumns = (columnNames: string[]): {[key: string]: string} => {
   const mappings: {[key: string]: string} = {};
   const usedColumns = new Set<string>();
   
-  // First pass: Handle exact matches (highest priority)
+  // Create a list of all potential exact matches to prioritize them
+  const exactMatches: { field: any, column: string, matchType: 'exact' | 'cleanedExact' }[] = [];
+  
+  // Find all exact matches first
   BUSINESS_FIELDS.forEach(field => {
     const fieldKey = field.key.toLowerCase();
     const fieldLabel = field.label.toLowerCase();
     
-    // Look for exact matches (case-insensitive)
-    const exactMatch = columnNames.find(col => {
+    columnNames.forEach(col => {
       const colLower = col.toLowerCase();
-      return colLower === fieldKey || 
-             colLower === fieldLabel ||
-             colLower.replace(/[^a-z0-9]/g, '') === fieldKey.replace(/[^a-z0-9]/g, '') ||
-             colLower.replace(/[^a-z0-9]/g, '') === fieldLabel.replace(/[^a-z0-9]/g, '');
+      
+      // Check for perfect exact matches first
+      if (colLower === fieldKey || colLower === fieldLabel) {
+        exactMatches.push({ field, column: col, matchType: 'exact' });
+      }
+      // Then check for cleaned exact matches
+      else if (colLower.replace(/[^a-z0-9]/g, '') === fieldKey.replace(/[^a-z0-9]/g, '') ||
+               colLower.replace(/[^a-z0-9]/g, '') === fieldLabel.replace(/[^a-z0-9]/g, '')) {
+        exactMatches.push({ field, column: col, matchType: 'cleanedExact' });
+      }
     });
-    
-    if (exactMatch && !usedColumns.has(exactMatch)) {
-      mappings[field.key] = exactMatch;
-      usedColumns.add(exactMatch);
+  });
+  
+  // Sort exact matches: perfect matches first, then cleaned matches
+  // Within each category, prioritize longer/more specific column names
+  exactMatches.sort((a, b) => {
+    if (a.matchType !== b.matchType) {
+      return a.matchType === 'exact' ? -1 : 1;
+    }
+    // For same match types, prioritize longer column names (more specific)
+    return b.column.length - a.column.length;
+  });
+  
+  // Apply exact matches in priority order
+  exactMatches.forEach(({ field, column, matchType }) => {
+    if (!mappings[field.key] && !usedColumns.has(column)) {
+      mappings[field.key] = column;
+      usedColumns.add(column);
     }
   });
   
@@ -320,7 +340,10 @@ export default function Home() {
         await workbook.xlsx.load(buffer);
         
         const worksheet = workbook.getWorksheet(1);
-        if (!worksheet) return;
+        if (!worksheet) {
+          alert('No worksheet found in the Excel file. Please ensure your file contains at least one worksheet.');
+          return;
+        }
         
         const headers: string[] = [];
         const allData: any[][] = [];
@@ -328,17 +351,41 @@ export default function Home() {
         // Get headers from first row
         const headerRow = worksheet.getRow(1);
         headerRow.eachCell((cell, colNumber) => {
-          headers.push(cell.value?.toString() || `Column ${colNumber}`);
+          const cellValue = cell.value;
+          let headerText = '';
+          
+          if (cellValue !== null && cellValue !== undefined) {
+            if (typeof cellValue === 'object' && 'text' in cellValue) {
+              headerText = cellValue.text;
+            } else {
+              headerText = cellValue.toString();
+            }
+          }
+          
+          headers.push(headerText || `Column ${colNumber}`);
         });
         
-        // Get data from first 10 rows
+        // Get data from first 10 rows (including header row for complete data structure)
         for (let rowNum = 1; rowNum <= Math.min(worksheet.rowCount, 10); rowNum++) {
           const row = worksheet.getRow(rowNum);
           const rowData: any[] = [];
           
           for (let colNum = 1; colNum <= headers.length; colNum++) {
             const cell = row.getCell(colNum);
-            rowData.push(cell.value?.toString() || '');
+            const cellValue = cell.value;
+            let displayValue = '';
+            
+            if (cellValue !== null && cellValue !== undefined) {
+              if (typeof cellValue === 'object' && 'text' in cellValue) {
+                displayValue = cellValue.text;
+              } else if (typeof cellValue === 'object' && 'result' in cellValue) {
+                displayValue = cellValue.result?.toString() || '';
+              } else {
+                displayValue = cellValue.toString();
+              }
+            }
+            
+            rowData.push(displayValue);
           }
           allData.push(rowData);
         }
@@ -351,8 +398,7 @@ export default function Home() {
         setColumnMappings(autoMappings);
         setAutoMappedFields(new Set(Object.keys(autoMappings)));
       } catch (error) {
-        console.error('Error processing Excel file:', error);
-        alert('Error reading Excel file. Please ensure it\'s a valid .xlsx or .xls file.');
+        alert('Unable to read the Excel file. Please ensure it is a valid .xlsx or .xls file and try again.');
       }
     };
     reader.readAsArrayBuffer(file);
@@ -409,53 +455,6 @@ export default function Home() {
     setCurrentStep(3);
   };
 
-  // Validation logic for column mappings
-  const validateMappings = () => {
-    const requiredFields = [
-      'exShowroomPrice',
-      'emps',
-      'stateSubsidy',
-      'postGstDiscount',
-      'p1Total',
-      'insurance',
-      'municipalTax',
-      'rtoRoadSafety',
-      'smartCardFee',
-      'postalCharges',
-      'serviceCharge',
-      'roadTax',
-      'effectiveOnRoadCore',
-      'effectiveOnRoadPro'
-    ];
-
-    const validMappings: string[] = [];
-    const invalidMappings: string[] = [];
-    const missingMappings: string[] = [];
-
-    requiredFields.forEach(field => {
-      const mappedColumn = columnMappings[field];
-      
-      if (!mappedColumn) {
-        // Field not mapped at all
-        missingMappings.push(field);
-      } else if (columnNames.includes(mappedColumn)) {
-        // Field mapped to a valid column
-        validMappings.push(field);
-      } else {
-        // Field mapped but column doesn't exist in Excel file
-        invalidMappings.push(field);
-      }
-    });
-
-    return {
-      validMappings,
-      invalidMappings,
-      missingMappings,
-      totalRequired: requiredFields.length,
-      isValid: invalidMappings.length === 0 && missingMappings.length === 0
-    };
-  };
-
   const getFieldLabel = (fieldKey: string) => {
     const field = BUSINESS_FIELDS.find(f => f.key === fieldKey);
     return field ? field.label : fieldKey;
@@ -477,10 +476,21 @@ export default function Home() {
   };
 
   const getPreviewData = (columnName: string) => {
-    if (!columnName || !worksheetData.length) return '';
+    if (!columnName || !worksheetData.length || !columnNames.length) return '';
+    
     const columnIndex = columnNames.indexOf(columnName);
-    if (columnIndex === -1 || !worksheetData[1]) return '';
-    return worksheetData[1][columnIndex] || '';
+    if (columnIndex === -1) return 'Column not found';
+    
+    // Look for the first non-empty data row (skip header row at index 0)
+    for (let rowIndex = 1; rowIndex < worksheetData.length; rowIndex++) {
+      const row = worksheetData[rowIndex];
+      if (row && row[columnIndex] && row[columnIndex].toString().trim()) {
+        const value = row[columnIndex].toString().trim();
+        return value.length > 30 ? value.substring(0, 30) + '...' : value;
+      }
+    }
+    
+    return 'No data';
   };
 
   // Check validation whenever mappings change
@@ -573,13 +583,13 @@ export default function Home() {
             />
             <AiOutlineCloudUpload size={48} className="mb-3 text-blue-500" />
             <span className="font-semibold text-base mb-1 text-gray-800">
-              Drop your Excel file here
+              Upload your Excel file
             </span>
             <span className="text-sm text-gray-600 mb-1">
-              or click to browse files
+              Drag and drop or click to browse
             </span>
             <span className="text-xs text-gray-500">
-              Supports .xlsx and .xls formats
+              Supports Excel files (.xlsx, .xls)
             </span>
           </div>
         )}
@@ -626,6 +636,9 @@ export default function Home() {
               <div className="space-y-3">
                 {BUSINESS_FIELDS.map((field) => {
                   const isAutoMapped = autoMappedFields.has(field.key);
+                  const mappedColumn = columnMappings[field.key];
+                  const previewData = mappedColumn ? getPreviewData(mappedColumn) : 'Preview';
+                  
                   return (
                     <div key={field.key} className={`grid grid-cols-12 gap-3 p-3 rounded items-center ${isAutoMapped ? 'bg-blue-50 border border-blue-200' : 'bg-gray-50'}`}>
                       <div className="col-span-4">
@@ -649,15 +662,15 @@ export default function Home() {
                       <div className="col-span-5">
                         <SearchableDropdown
                           options={columnNames}
-                          value={columnMappings[field.key] || ''}
+                          value={mappedColumn || ''}
                           onChange={(value) => handleColumnMapping(field.key, value)}
                           placeholder="Select or type to search..."
                         />
                       </div>
                       <div className="col-span-3">
                         <div className="text-xs text-gray-600 bg-gray-100 px-2 py-2 rounded text-center min-h-[32px] flex items-center justify-center">
-                          <span className="truncate" title={columnMappings[field.key] ? getPreviewData(columnMappings[field.key]) || 'No data' : 'Preview'}>
-                            {columnMappings[field.key] ? getPreviewData(columnMappings[field.key]) || 'No data' : 'Preview'}
+                          <span className="truncate" title={previewData}>
+                            {previewData}
                           </span>
                         </div>
                       </div>
@@ -763,34 +776,56 @@ export default function Home() {
               {/* Data Preview */}
               <div className="bg-white/70 rounded-lg border border-gray-200 overflow-hidden">
                 <div className="px-4 py-3 bg-gray-50/70 border-b border-gray-200">
-                  <h3 className="text-lg font-medium text-gray-900">Data Preview (First 5 Rows)</h3>
+                  <h3 className="text-lg font-medium text-gray-900">Data Preview (First 5 Data Rows)</h3>
+                  <p className="text-sm text-gray-600 mt-1">Showing mapped columns with sample data</p>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50/50">
                       <tr>
-                        {Object.values(columnMappings).filter(col => col).slice(0, 5).map((column, index) => (
-                          <th key={index} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            {column}
-                          </th>
-                        ))}
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Business Field
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Excel Column
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Sample Data
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="bg-white/30 divide-y divide-gray-200">
-                      {worksheetData.slice(1, 6).map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                          {Object.values(columnMappings).filter(col => col).slice(0, 5).map((column, colIndex) => {
-                            const columnIndex = columnNames.indexOf(column as string);
-                            return (
-                              <td key={colIndex} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                {columnIndex !== -1 ? (row[columnIndex] || '-') : '-'}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
+                      {BUSINESS_FIELDS.filter(field => columnMappings[field.key]).map((field, index) => {
+                        const mappedColumn = columnMappings[field.key];
+                        const sampleData = getPreviewData(mappedColumn);
+                        return (
+                          <tr key={index}>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                              {field.label}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                              {mappedColumn}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                              {sampleData}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
+                  
+                  {/* Summary */}
+                  <div className="px-4 py-3 bg-gray-50/30 border-t border-gray-200">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-600">
+                        Total mapped fields: {Object.keys(columnMappings).filter(key => columnMappings[key]).length}
+                      </span>
+                      <span className="text-gray-600">
+                        Total data rows available: {Math.max(0, worksheetData.length - 1)}
+                      </span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -801,26 +836,20 @@ export default function Home() {
                 >
                   Back to Mapping
                 </button>
-                <div className="space-x-3">
-                  {/* <button
-                    onClick={() => {
-                      // TODO: Implement download functionality
-                      alert('Download functionality would be implemented here');
-                    }}
-                    className="bg-green-600 text-white px-8 py-3 rounded-lg hover:bg-green-700 transition-colors font-medium"
-                  >
-                    Download Results
-                  </button>
-                  <button
-                    onClick={() => {
-                      // TODO: Implement export functionality
-                      alert('Export functionality would be implemented here');
-                    }}
-                    className="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium"
-                  >
-                     Export Validated Data
-                  </button> */}
-                </div>
+                <button
+                  onClick={() => {
+                    setCurrentStep(1);
+                    setFileName(null);
+                    setUploadedFile(null);
+                    setColumnNames([]);
+                    setColumnMappings({});
+                    setWorksheetData([]);
+                    setAutoMappedFields(new Set());
+                  }}
+                  className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Process New File
+                </button>
               </div>
             </div>
           </div>
