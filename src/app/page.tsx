@@ -5,7 +5,6 @@ import { useEffect, useRef, useState } from "react";
 import { AiOutlineCloudUpload } from "react-icons/ai";
 import * as ExcelJS from 'exceljs';
 
-// Custom SearchableDropdown component
 const SearchableDropdown = ({ 
   options, 
   value, 
@@ -186,26 +185,42 @@ const findBestMatch = (businessField: { key: string; label: string }, columnName
   
   let bestMatch = '';
   let bestScore = 0;
-  const threshold = 0.3; // Minimum similarity threshold
+  const threshold = 0.5; // Minimum similarity threshold to prevent poor matches
   
+  // First pass: Look for exact matches only
+  for (const column of columnNames) {
+    const columnLower = column.toLowerCase();
+    
+    // Perfect exact matches (case-insensitive)
+    if (columnLower === fieldKey || columnLower === fieldLabel) {
+      return column; // Return immediately for perfect matches
+    }
+    
+    // Exact match after removing special characters and spaces
+    if (columnLower.replace(/[^a-z0-9]/g, '') === fieldKey.replace(/[^a-z0-9]/g, '') || 
+        columnLower.replace(/[^a-z0-9]/g, '') === fieldLabel.replace(/[^a-z0-9]/g, '')) {
+      return column; // Return immediately for cleaned exact matches
+    }
+  }
+  
+  // Second pass: If no exact match found, use fuzzy matching
   columnNames.forEach(column => {
     const columnLower = column.toLowerCase();
     const columnKeywords = getKeywords(column);
     
     let score = 0;
     
-    // Exact matches (case-insensitive)
-    if (columnLower === fieldKey || columnLower === fieldLabel) {
-      score = 1.0;
+    // Skip columns that are clearly unrelated to business/financial data
+    if (columnLower.includes('product') || columnLower.includes('name') || 
+        columnLower.includes('model') || columnLower.includes('code') ||
+        columnLower.includes('category') || columnLower.includes('region') ||
+        columnLower.includes('status')) {
+      return; // Skip this column entirely for fuzzy matching
     }
-    // Exact match after removing special characters and spaces
-    else if (columnLower.replace(/[^a-z0-9]/g, '') === fieldKey.replace(/[^a-z0-9]/g, '') || 
-             columnLower.replace(/[^a-z0-9]/g, '') === fieldLabel.replace(/[^a-z0-9]/g, '')) {
-      score = 0.95;
-    }
+    
     // Field key/label contains column name or vice versa
-    else if (fieldKey.includes(columnLower) || columnLower.includes(fieldKey) ||
-             fieldLabel.includes(columnLower) || columnLower.includes(fieldLabel)) {
+    if (fieldKey.includes(columnLower) || columnLower.includes(fieldKey) ||
+        fieldLabel.includes(columnLower) || columnLower.includes(fieldLabel)) {
       score = 0.8;
     }
     // Fuzzy Logic
@@ -251,52 +266,52 @@ const autoMapColumns = (columnNames: string[]): {[key: string]: string} => {
   const mappings: {[key: string]: string} = {};
   const usedColumns = new Set<string>();
   
-  // Create a list of all potential exact matches to prioritize them
-  const exactMatches: { field: any, column: string, matchType: 'exact' | 'cleanedExact' }[] = [];
-  
-  // Find all exact matches first
+  // First pass: Find perfect exact matches only
   BUSINESS_FIELDS.forEach(field => {
     const fieldKey = field.key.toLowerCase();
     const fieldLabel = field.label.toLowerCase();
     
-    columnNames.forEach(col => {
+    // Look for perfect exact matches first
+    const exactMatch = columnNames.find(col => {
       const colLower = col.toLowerCase();
-      
-      // Check for perfect exact matches first
-      if (colLower === fieldKey || colLower === fieldLabel) {
-        exactMatches.push({ field, column: col, matchType: 'exact' });
-      }
-      // Then check for cleaned exact matches
-      else if (colLower.replace(/[^a-z0-9]/g, '') === fieldKey.replace(/[^a-z0-9]/g, '') ||
-               colLower.replace(/[^a-z0-9]/g, '') === fieldLabel.replace(/[^a-z0-9]/g, '')) {
-        exactMatches.push({ field, column: col, matchType: 'cleanedExact' });
-      }
+      return colLower === fieldKey || colLower === fieldLabel;
     });
-  });
-  
-  // Sort exact matches: perfect matches first, then cleaned matches
-  // Within each category, prioritize longer/more specific column names
-  exactMatches.sort((a, b) => {
-    if (a.matchType !== b.matchType) {
-      return a.matchType === 'exact' ? -1 : 1;
-    }
-    // For same match types, prioritize longer column names (more specific)
-    return b.column.length - a.column.length;
-  });
-  
-  // Apply exact matches in priority order
-  exactMatches.forEach(({ field, column, matchType }) => {
-    if (!mappings[field.key] && !usedColumns.has(column)) {
-      mappings[field.key] = column;
-      usedColumns.add(column);
+    
+    if (exactMatch && !usedColumns.has(exactMatch)) {
+      mappings[field.key] = exactMatch;
+      usedColumns.add(exactMatch);
     }
   });
   
-  // Second pass: Handle remaining fields with similarity matching
-  const unmappedFields = BUSINESS_FIELDS.filter(field => !mappings[field.key]);
+  // Second pass: Find cleaned exact matches for remaining fields
+  const remainingFields = BUSINESS_FIELDS.filter(field => !mappings[field.key]);
+  
+  remainingFields.forEach(field => {
+    const fieldKey = field.key.toLowerCase();
+    const fieldLabel = field.label.toLowerCase();
+    
+    const cleanedExactMatch = columnNames.find(col => {
+      if (usedColumns.has(col)) return false;
+      
+      const colLower = col.toLowerCase();
+      const fieldKeyCleaned = fieldKey.replace(/[^a-z0-9]/g, '');
+      const fieldLabelCleaned = fieldLabel.replace(/[^a-z0-9]/g, '');
+      const colCleaned = colLower.replace(/[^a-z0-9]/g, '');
+      
+      return colCleaned === fieldKeyCleaned || colCleaned === fieldLabelCleaned;
+    });
+    
+    if (cleanedExactMatch) {
+      mappings[field.key] = cleanedExactMatch;
+      usedColumns.add(cleanedExactMatch);
+    }
+  });
+  
+  // Third pass: Handle remaining fields with similarity matching
+  const stillUnmappedFields = BUSINESS_FIELDS.filter(field => !mappings[field.key]);
   
   // Sort remaining fields by specificity (more specific fields first)
-  const sortedFields = unmappedFields.sort((a, b) => {
+  const sortedFields = stillUnmappedFields.sort((a, b) => {
     const aSpecific = a.label.split(' ').length;
     const bSpecific = b.label.split(' ').length;
     return bSpecific - aSpecific;
@@ -350,43 +365,85 @@ export default function Home() {
         
         // Get headers from first row
         const headerRow = worksheet.getRow(1);
-        headerRow.eachCell((cell, colNumber) => {
+        const maxCol = headerRow.actualCellCount || headerRow.cellCount;
+        
+        // Process headers with consistent column indexing
+        for (let colNum = 1; colNum <= maxCol; colNum++) {
+          const cell = headerRow.getCell(colNum);
           const cellValue = cell.value;
           let headerText = '';
           
           if (cellValue !== null && cellValue !== undefined) {
             if (typeof cellValue === 'object' && 'text' in cellValue) {
               headerText = cellValue.text;
+            } else if (typeof cellValue === 'object' && 'richText' in cellValue) {
+              // Handle rich text cells
+              headerText = cellValue.richText.map((rt: any) => rt.text).join('');
             } else {
               headerText = cellValue.toString();
             }
           }
           
-          headers.push(headerText || `Column ${colNumber}`);
-        });
+          headers.push(headerText || `Column ${colNum}`);
+        }
         
         // Get data from first 10 rows (including header row for complete data structure)
         for (let rowNum = 1; rowNum <= Math.min(worksheet.rowCount, 10); rowNum++) {
           const row = worksheet.getRow(rowNum);
           const rowData: any[] = [];
           
-          for (let colNum = 1; colNum <= headers.length; colNum++) {
+          // Process columns based on the same maxCol used for headers
+          for (let colNum = 1; colNum <= maxCol; colNum++) {
             const cell = row.getCell(colNum);
             const cellValue = cell.value;
             let displayValue = '';
             
-            if (cellValue !== null && cellValue !== undefined) {
-              if (typeof cellValue === 'object' && 'text' in cellValue) {
+            // Handle different cell value types more carefully
+            if (cellValue === null || cellValue === undefined) {
+              displayValue = '';
+            } else if (typeof cellValue === 'string') {
+              displayValue = cellValue;
+            } else if (typeof cellValue === 'number') {
+              // For numeric values, use the cell's formatted text if available, otherwise convert to string
+              displayValue = cell.text || cellValue.toString();
+            } else if (cellValue instanceof Date) {
+              // Handle date cells
+              displayValue = cellValue.toLocaleDateString();
+            } else if (typeof cellValue === 'boolean') {
+              displayValue = cellValue.toString();
+            } else if (typeof cellValue === 'object') {
+              if ('text' in cellValue && typeof cellValue.text === 'string') {
                 displayValue = cellValue.text;
-              } else if (typeof cellValue === 'object' && 'result' in cellValue) {
-                displayValue = cellValue.result?.toString() || '';
+              } else if ('result' in cellValue) {
+                // Handle formula cells - check both result and formula
+                const result = cellValue.result;
+                if (result !== null && result !== undefined) {
+                  displayValue = typeof result === 'number' ? 
+                    (cell.text || result.toString()) : 
+                    result.toString();
+                } else if ('formula' in cellValue && typeof cellValue.formula === 'string') {
+                  displayValue = `[Formula: ${cellValue.formula}]`;
+                } else {
+                  displayValue = '';
+                }
+              } else if ('richText' in cellValue && Array.isArray(cellValue.richText)) {
+                // Handle rich text cells
+                displayValue = cellValue.richText.map((rt: any) => rt.text || '').join('');
+              } else if ('hyperlink' in cellValue) {
+                // Handle hyperlink cells more safely
+                displayValue = cell.text || '';
               } else {
-                displayValue = cellValue.toString();
+                // Fallback for other object types
+                displayValue = cell.text || String(cellValue);
               }
+            } else {
+              // Final fallback
+              displayValue = String(cellValue);
             }
             
             rowData.push(displayValue);
           }
+          
           allData.push(rowData);
         }
         
@@ -455,11 +512,6 @@ export default function Home() {
     setCurrentStep(3);
   };
 
-  const getFieldLabel = (fieldKey: string) => {
-    const field = BUSINESS_FIELDS.find(f => f.key === fieldKey);
-    return field ? field.label : fieldKey;
-  };
-
   const handleColumnMapping = (field: string, columnName: string) => {
     setColumnMappings(prev => ({
       ...prev,
@@ -481,13 +533,36 @@ export default function Home() {
     const columnIndex = columnNames.indexOf(columnName);
     if (columnIndex === -1) return 'Column not found';
     
-    // Look for the first non-empty data row (skip header row at index 0)
+    // Verify the column index is valid
+    if (columnIndex >= columnNames.length) {
+      return 'Invalid column index';
+    }
+    
+    // Look through all data rows (skip header row at index 0)
     for (let rowIndex = 1; rowIndex < worksheetData.length; rowIndex++) {
       const row = worksheetData[rowIndex];
-      if (row && row[columnIndex] && row[columnIndex].toString().trim()) {
-        const value = row[columnIndex].toString().trim();
-        return value.length > 30 ? value.substring(0, 30) + '...' : value;
+      
+      if (row && columnIndex < row.length) {
+        const cellValue = row[columnIndex];
+        
+        // Check for any non-empty value (including 0, false, etc.)
+        if (cellValue !== null && cellValue !== undefined && cellValue !== '') {
+          const value = cellValue.toString().trim();
+          if (value !== '') {
+            // Don't show very long values
+            if (value.length > 50) {
+              return value.substring(0, 47) + '...';
+            }
+            return value;
+          }
+        }
       }
+    }
+    
+    // If no data found in any row, show the header to confirm column exists
+    if (worksheetData.length > 0 && worksheetData[0] && columnIndex < worksheetData[0].length && worksheetData[0][columnIndex]) {
+      const headerValue = worksheetData[0][columnIndex];
+      return `[Header: ${headerValue}]`;
     }
     
     return 'No data';
@@ -776,20 +851,20 @@ export default function Home() {
               {/* Data Preview */}
               <div className="bg-white/70 rounded-lg border border-gray-200 overflow-hidden">
                 <div className="px-4 py-3 bg-gray-50/70 border-b border-gray-200">
-                  <h3 className="text-lg font-medium text-gray-900">Data Preview (First 5 Data Rows)</h3>
+                  <h3 className="text-lg font-medium text-gray-900">Data Preview</h3>
                   <p className="text-sm text-gray-600 mt-1">Showing mapped columns with sample data</p>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50/50">
                       <tr>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Business Field
                         </th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Excel Column
                         </th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Sample Data
                         </th>
                       </tr>
@@ -800,13 +875,13 @@ export default function Home() {
                         const sampleData = getPreviewData(mappedColumn);
                         return (
                           <tr key={index}>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                            <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                               {field.label}
                             </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-700">
                               {mappedColumn}
                             </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-600">
                               {sampleData}
                             </td>
                           </tr>
